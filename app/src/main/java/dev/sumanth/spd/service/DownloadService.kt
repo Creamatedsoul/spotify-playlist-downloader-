@@ -8,6 +8,9 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.content.Context
+import androidx.core.net.toUri
+import androidx.documentfile.provider.DocumentFile
 import androidx.core.app.NotificationCompat
 import dev.sumanth.spd.MainActivity
 import dev.sumanth.spd.model.AppStatus
@@ -74,11 +77,43 @@ class DownloadService : Service() {
         }
         return START_NOT_STICKY
     }
+    private val audioExtensions = setOf("mp3", "m4a", "opus", "ogg", "webm", "flac", "wav", "aac")
 
+    private fun existingBaseNames(
+        context: Context,
+        folderUriString: String,
+        createSubfolder: Boolean,
+        playlistName: String?
+    ): Set<String> {
+        var dir = DocumentFile.fromTreeUri(context, folderUriString.toUri()) ?: return emptySet()
+
+        if (createSubfolder && !playlistName.isNullOrBlank()) {
+            val sub = dir.findFile(DownloadManager.sanitizeFilename(playlistName))
+            if (sub == null || !sub.isDirectory) return emptySet()
+            dir = sub
+        }
+
+        return dir.listFiles()
+            .filter { it.isFile && it.length() > 0 }
+            .mapNotNull { it.name }
+            .filter { it.substringAfterLast('.', "").lowercase() in audioExtensions }
+            .map { it.substringBeforeLast('.').lowercase() }
+            .toHashSet()
+    }
     private fun startDownloads(downloadPath: String, convertToMp3: Boolean, createSubfolder: Boolean, playlistName: String?) {
         downloadJob?.cancel()
         downloadJob = serviceScope.launch {
             DownloadState.appStatus = AppStatus.DOWNLOADING
+             // NEW: mark tracks already in the folder as COMPLETE so they get skipped
+            val existing = existingBaseNames(this@DownloadService, downloadPath, createSubfolder, playlistName)
+            for ((i, track) in DownloadState.tracks.withIndex()) {
+                if (track.isSelected && track.status != DownloadStatus.COMPLETE &&
+                    DownloadManager.sanitizeFilename(track.title).lowercase() in existing
+                ) {
+                    DownloadState.tracks[i] = track.copy(status = DownloadStatus.COMPLETE)
+                }
+            }
+            // END NEW
             val selectedTracks = DownloadState.tracks.filter { it.isSelected && it.status != DownloadStatus.COMPLETE }
             var processedCount = 0
             val totalToDownload = selectedTracks.size
